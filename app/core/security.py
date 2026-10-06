@@ -1,4 +1,5 @@
 """Protecciones de la capa web: cabeceras, origen de las peticiones, tamaño del cuerpo y ritmo de uso."""
+import logging
 import threading
 import time
 from collections import defaultdict, deque
@@ -11,6 +12,7 @@ from fastapi.responses import JSONResponse
 from app.config.settings import ALLOWED_HOSTS, API_REQUESTS_PER_MINUTE
 from app.core.network import get_visitor_id
 
+logger = logging.getLogger("cvision.security")
 STATE_CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
 
 CSP = "; ".join([
@@ -146,6 +148,8 @@ class BodyLimitMiddleware:
 
 async def security_middleware(request: Request, call_next):
     """Origen → ritmo de la API → respuesta con cabeceras seguras."""
+    if request.url.path == "/api/usage":  # TEMPORAL: diagnóstico de la cadena de proxies
+        logger.info("diag xff=%r client=%s cf=%r", request.headers.get("x-forwarded-for"), request.client.host if request.client else None, request.headers.get("cf-connecting-ip"))
     if is_cross_origin(request):
         response = reject(403, "Origen no permitido.")
     elif request.url.path.startswith("/api/") and not api_limiter.allow(get_visitor_id(request)):
