@@ -1,0 +1,14 @@
+# Secretos: nunca subir la clave de OpenAI
+.env
+
+# Datos locales de uso de la demostración
+*.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Clave local para firmar respuestas
+.app_secret
