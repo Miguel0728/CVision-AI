@@ -45,7 +45,7 @@ python -m unittest discover -s tests -v    # pruebas (no gastan tokens)
 | `OPENAI_API_KEY` | tu clave (solo aquí, nunca en el repositorio) |
 | `APP_SECRET` | 64 caracteres aleatorios (`python -c "import secrets; print(secrets.token_hex(32))"`) |
 | `ALLOWED_HOSTS` | `tu-app.onrender.com` |
-| `PROXY_HOPS` | `1` |
+| `PROXY_HOPS` | `3` (la cadena en Render es cliente → Cloudflare → balanceador) |
 
 - En el plan gratuito el disco es **temporal**: el contador de uso y la bandeja de salida se reinician en cada despliegue o tras inactividad. Para que persistan hace falta un disco persistente (`USAGE_DB_PATH`, `OUTBOX_DB_PATH` apuntando a él) o un almacén externo.
 - **Pon además un límite de gasto mensual en el panel de OpenAI.** Es el único tope que no depende de este código.
@@ -64,4 +64,4 @@ Defensas por capas, de las que no dependen del modelo a las que sí:
 3. **Prompt:** reglas de seguridad explícitas (confidencialidad, datos ≠ órdenes, ámbito limitado).
 4. **Web:** CSP estricta y demás cabeceras, `/docs` desactivado, validación de `Host` y `Origin` (anti-CSRF), límite de tamaño del cuerpo, límite general de ritmo, errores internos solo en el log del servidor.
 
-Limitaciones: la detección por patrones no detecta todo (por eso las defensas estructurales); `X-Forwarded-For` solo se usa si `PROXY_HOPS` > 0; los datos de la demo son ficticios y no hay autenticación de usuarios.
+Limitaciones: la detección por patrones no detecta todo (por eso las defensas estructurales); `X-Forwarded-For` solo se usa si `PROXY_HOPS` > 0 (el límite de preguntas se cuenta por navegador mediante una cookie anónima, con un tope más amplio por IP); los datos de la demo son ficticios y no hay autenticación de usuarios.

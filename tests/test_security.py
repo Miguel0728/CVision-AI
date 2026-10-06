@@ -41,6 +41,7 @@ _counter = iter(range(1, 10_000))
 
 def new_visitor() -> dict:
     """Cada prueba actúa como un visitante distinto (así no comparten límites ni bloqueos)."""
+    client.cookies.clear()
     return {"x-forwarded-for": f"10.0.{next(_counter) // 250}.{next(_counter) % 250}"}
 
 
@@ -111,7 +112,7 @@ class WebHardeningTests(unittest.TestCase):
             self.assertNotIn("OPENAI_API_KEY", response.text, path)
 
     def test_api_rate_limiter_blocks_bursts(self):
-        limiter = security.ApiRateLimiter(per_minute=3)
+        limiter = security.ApiRateLimiter(3)
         self.assertEqual([limiter.allow("a") for _ in range(4)], [True, True, True, False])
         self.assertTrue(limiter.allow("b"))
 
@@ -128,6 +129,61 @@ class VisitorIdentityTests(unittest.TestCase):
     def test_header_is_ignored_without_trusted_proxy(self):
         with mock.patch.object(network, "PROXY_HOPS", 0):
             self.assertEqual(network.get_visitor_id(self._request("1.1.1.1")), "9.9.9.9")
+
+
+class VisitorLimitTests(unittest.TestCase):
+    def test_render_chain_resolves_to_the_real_client_ip(self):
+        with mock.patch.object(network, "PROXY_HOPS", 3):
+            request = mock.Mock(headers={"x-forwarded-for": "72.50.7.168, 162.158.72.142, 10.30.140.32"}, client=mock.Mock(host="10.0.0.1"))
+            self.assertEqual(network.get_visitor_id(request), "72.50.7.168")
+
+    def test_internal_hop_changes_do_not_change_the_visitor(self):
+        with mock.patch.object(network, "PROXY_HOPS", 3):
+            ids = {network.get_visitor_id(mock.Mock(headers={"x-forwarded-for": f"72.50.7.168, 162.158.7.1, 10.{n}.1.1"}, client=None)) for n in range(5)}
+        self.assertEqual(ids, {"72.50.7.168"})
+
+    def test_a_forged_left_entry_does_not_change_the_visitor(self):
+        with mock.patch.object(network, "PROXY_HOPS", 3):
+            request = mock.Mock(headers={"x-forwarded-for": "6.6.6.6, 72.50.7.168, 162.158.72.142, 10.30.140.32"}, client=None)
+            self.assertEqual(network.get_visitor_id(request), "72.50.7.168")
+
+    def test_browser_cookie_is_issued_once_and_is_httponly(self):
+        client.cookies.clear()
+        first = client.get("/")
+        self.assertIn("httponly", first.headers["set-cookie"].lower())
+        self.assertIn("samesite=lax", first.headers["set-cookie"].lower())
+        self.assertNotIn("set-cookie", client.get("/").headers)
+
+    def test_the_counter_follows_the_browser_when_the_ip_changes(self):
+        client.cookies.clear()
+        client.get("/", headers={"x-forwarded-for": "20.0.0.1"})
+        for ip in ("20.0.0.1", "20.0.0.2", "20.0.0.3"):
+            ask("hola", headers={"x-forwarded-for": ip})
+        used = client.get("/api/usage", headers={"x-forwarded-for": "20.0.0.99"}).json()["requests_used"]
+        self.assertEqual(used, 3)
+
+    def test_two_browsers_on_the_same_ip_have_separate_counters(self):
+        a, b = TestClient(app), TestClient(app)
+        for c in (a, b):
+            c.get("/", headers={"x-forwarded-for": "21.0.0.1"})
+        a.post("/api/chat", json={"messages": [{"role": "user", "content": "hola"}]}, headers={"x-forwarded-for": "21.0.0.1"})
+        self.assertEqual(a.get("/api/usage", headers={"x-forwarded-for": "21.0.0.1"}).json()["requests_used"], 1)
+        self.assertEqual(b.get("/api/usage", headers={"x-forwarded-for": "21.0.0.1"}).json()["requests_used"], 0)
+
+    def test_rotating_cookies_cannot_bypass_the_ip_cap(self):
+        capped = security.ApiRateLimiter(2, window_seconds=3600)
+        with mock.patch("app.routes.chat.chat_ip_limiter", capped):
+            statuses = []
+            for n in range(4):
+                client.cookies.clear()
+                headers = {"x-forwarded-for": "22.0.0.1", "cookie": f"cv_vid={n:032x}"}
+                statuses.append(ask("hola", headers=headers).status_code)
+        self.assertEqual(statuses, [200, 200, 429, 429])
+
+    def test_malformed_cookies_are_ignored(self):
+        client.cookies.clear()
+        response = client.get("/", headers={"cookie": "cv_vid=../../etc/passwd"})
+        self.assertIn("set-cookie", response.headers)
 
 
 class SigningTests(unittest.TestCase):

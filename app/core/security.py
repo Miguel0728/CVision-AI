@@ -1,5 +1,4 @@
 """Protecciones de la capa web: cabeceras, origen de las peticiones, tamaño del cuerpo y ritmo de uso."""
-import logging
 import threading
 import time
 from collections import defaultdict, deque
@@ -9,10 +8,9 @@ from urllib.parse import urlparse
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from app.config.settings import ALLOWED_HOSTS, API_REQUESTS_PER_MINUTE
-from app.core.network import get_visitor_id
+from app.config.settings import ALLOWED_HOSTS, API_REQUESTS_PER_MINUTE, IP_REQUESTS_PER_HOUR
+from app.core.network import COOKIE_MAX_AGE, VISITOR_COOKIE, get_session_id, get_visitor_id, new_session_id
 
-logger = logging.getLogger("cvision.security")
 STATE_CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
 
 CSP = "; ".join([
@@ -68,13 +66,13 @@ def is_cross_origin(request: Request) -> bool:
 
 
 class ApiRateLimiter:
-    """Ritmo general de la API por visitante (independiente del límite de gasto del modelo)."""
+    """Máximo de peticiones por clave dentro de una ventana de tiempo (en memoria)."""
 
-    WINDOW_SECONDS = 60
     MAX_TRACKED = 5000
 
-    def __init__(self, per_minute: int):
-        self._per_minute = per_minute
+    def __init__(self, max_requests: int, window_seconds: int = 60):
+        self._max_requests = max_requests
+        self.WINDOW_SECONDS = window_seconds
         self._hits: Dict[str, Deque[float]] = defaultdict(deque)
         self._lock = threading.Lock()
 
@@ -84,7 +82,7 @@ class ApiRateLimiter:
             hits = self._hits[visitor]
             while hits and now - hits[0] > self.WINDOW_SECONDS:
                 hits.popleft()
-            if len(hits) >= self._per_minute:
+            if len(hits) >= self._max_requests:
                 return False
             hits.append(now)
             if len(self._hits) > self.MAX_TRACKED:
@@ -97,7 +95,8 @@ class ApiRateLimiter:
             del self._hits[visitor]
 
 
-api_limiter = ApiRateLimiter(API_REQUESTS_PER_MINUTE)
+api_limiter = ApiRateLimiter(API_REQUESTS_PER_MINUTE, window_seconds=60)
+chat_ip_limiter = ApiRateLimiter(IP_REQUESTS_PER_HOUR, window_seconds=3600)
 
 
 def reject(status: int, message: str) -> JSONResponse:
@@ -146,10 +145,18 @@ class BodyLimitMiddleware:
             await self._send_413(send)
 
 
+def ensure_session_cookie(request: Request, response) -> None:
+    """Entrega al navegador un identificador anónimo (sin datos personales) para contar su uso."""
+    if get_session_id(request):
+        return
+    response.set_cookie(
+        VISITOR_COOKIE, new_session_id(), max_age=COOKIE_MAX_AGE,
+        httponly=True, samesite="lax", secure=_is_https(request),
+    )
+
+
 async def security_middleware(request: Request, call_next):
-    """Origen → ritmo de la API → respuesta con cabeceras seguras."""
-    if request.url.path == "/api/usage":  # TEMPORAL: diagnóstico de la cadena de proxies
-        logger.info("diag xff=%r client=%s cf=%r", request.headers.get("x-forwarded-for"), request.client.host if request.client else None, request.headers.get("cf-connecting-ip"))
+    """Origen → ritmo de la API → respuesta con cabeceras seguras y cookie de navegador."""
     if is_cross_origin(request):
         response = reject(403, "Origen no permitido.")
     elif request.url.path.startswith("/api/") and not api_limiter.allow(get_visitor_id(request)):
@@ -157,4 +164,5 @@ async def security_middleware(request: Request, call_next):
     else:
         response = await call_next(request)
     add_security_headers(request, response)
+    ensure_session_cookie(request, response)
     return response

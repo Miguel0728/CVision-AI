@@ -8,7 +8,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
 from app.core.guard import inspect_message, strikes
-from app.core.network import get_visitor_id
+from app.core.network import get_visitor_id, get_visitor_key
+from app.core.security import chat_ip_limiter
 from app.core.signing import sign_message
 from app.core.usage_limits import limiter
 from app.services.ai_service import chat_stream, static_reply_stream
@@ -53,6 +54,16 @@ def _sse(events):
         yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
+def _reject_if_over_ip_cap(ip: str) -> None:
+    """Tope por IP: evita que cambiar de cookie sirva para saltarse el límite de cada navegador."""
+    if not chat_ip_limiter.allow(ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Demasiadas preguntas desde esta red. Inténtalo de nuevo más tarde.",
+            headers={"Retry-After": "3600"},
+        )
+
+
 def _reject_if_blocked(visitor: str) -> None:
     wait = strikes.seconds_blocked(visitor)
     if wait:
@@ -65,9 +76,10 @@ def _reject_if_blocked(visitor: str) -> None:
 
 @router.post("")
 def chat(request: ChatRequest, http_request: Request):
-    visitor = get_visitor_id(http_request)
-    _reject_if_blocked(visitor)
-    limiter.check(visitor)
+    ip = get_visitor_id(http_request)
+    _reject_if_blocked(ip)
+    _reject_if_over_ip_cap(ip)
+    limiter.check(get_visitor_key(http_request))
 
     messages = prepare_messages([m.model_dump() for m in request.messages])
     if not messages or messages[-1]["role"] != "user":
@@ -77,8 +89,8 @@ def chat(request: ChatRequest, http_request: Request):
     if verdict.allowed:
         events = chat_stream(messages)
     else:
-        strikes.record(visitor)
-        logger.warning("guard_blocked category=%s visitor=%s", verdict.category, _anonymous(visitor))
+        strikes.record(ip)
+        logger.warning("guard_blocked category=%s visitor=%s", verdict.category, _anonymous(ip))
         events = static_reply_stream(verdict.reply)
 
     return StreamingResponse(

@@ -46,3 +46,5 @@ PROXY_HOPS = int(os.getenv("PROXY_HOPS", "0"))
 ENABLE_DOCS = os.getenv("ENABLE_DOCS", "false").lower() == "true"
 MAX_BODY_BYTES = int(os.getenv("MAX_BODY_BYTES", "65536"))
 API_REQUESTS_PER_MINUTE = int(os.getenv("API_REQUESTS_PER_MINUTE", "120"))
+# Tope de preguntas por IP y hora (más amplio que el de cada navegador): frena a quien cambia de cookie para saltarse el límite.
+IP_REQUESTS_PER_HOUR = int(os.getenv("IP_REQUESTS_PER_HOUR", "60"))
